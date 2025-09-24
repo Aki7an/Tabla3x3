@@ -10,13 +10,13 @@
   <body class="min-h-screen bg-slate-50 text-slate-900">
     <div id="root"></div>
 
-    <!-- React 18 + ReactDOM 18 (UMD, producción) -->
+    <!-- React 18 + ReactDOM 18 UMD (producción) -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <!-- Babel para habilitar JSX en el navegador -->
+    <!-- Babel para poder usar JSX en el navegador -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-    <!-- Tu app: SIN TypeScript, SIN imports; todo dentro de <script type="text/babel"> -->
+    <!-- App: SIN TypeScript ni imports -->
     <script type="text/babel">
       const { useMemo, useState } = React;
 
@@ -29,7 +29,21 @@
         const [scoreB, setScoreB] = useState("");
         const [activeTab, setActiveTab] = useState("jugadores"); // "jugadores" | "partido" | "clasificacion"
 
-        // validación de jugadores
+        // --- Helpers ---------------------------------------------------------
+        function generateUniqueMatches() {
+          const idx = [0,1,2,3,4,5];
+          const combos = [];
+          for (let a=0;a<4;a++) for (let b=a+1;b<5;b++) for (let c=b+1;c<6;c++) combos.push([idx[a],idx[b],idx[c]]);
+          const out = [];
+          for (const teamA of combos) {
+            const teamB = idx.filter(i => !teamA.includes(i));
+            if (Math.min(...teamA) < Math.min(...teamB)) out.push({ teamA:[...teamA], teamB:[...teamB] });
+          }
+          return out; // 10 partidos
+        }
+        function shuffle(arr){ for(let i=arr.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [arr[i],arr[j]]=[arr[j],arr[i]];} return arr; }
+
+        // --- Validación jugadores -------------------------------------------
         const allPlayersValid = useMemo(() => {
           const cleaned = names.map((n) => n.trim());
           if (cleaned.some((n) => n.length === 0)) return false;
@@ -47,41 +61,40 @@
           setActiveTab("partido");
         }
 
-        // genera 10 partidos 3v3 únicos
-        function generateUniqueMatches() {
-          const idx = [0,1,2,3,4,5];
-          const combos = [];
-          for (let a=0;a<4;a++) for (let b=a+1;b<5;b++) for (let c=b+1;c<6;c++) combos.push([idx[a],idx[b],idx[c]]);
-          const out = [];
-          for (const teamA of combos) {
-            const teamB = idx.filter(i => !teamA.includes(i));
-            if (Math.min(...teamA) < Math.min(...teamB)) out.push({ teamA:[...teamA], teamB:[...teamB] });
-          }
-          return out;
-        }
-
-        function shuffle(arr){ for(let i=arr.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [arr[i],arr[j]]=[arr[j],arr[i]];} return arr; }
-
-        // clasificación acumulada
+        // --- Clasificación: Pts, PJ, PF, PC ---------------------------------
         const standings = useMemo(() => {
-          const pts = Array(6).fill(0), pj = Array(6).fill(0);
+          const pts = Array(6).fill(0);
+          const pj  = Array(6).fill(0);
+          const pf  = Array(6).fill(0);
+          const pc  = Array(6).fill(0);
+
           matches.forEach(m => {
-            if (!m.result) return;
-            m.teamA.forEach(p => pj[p]++);
-            m.teamB.forEach(p => pj[p]++);
-            if (m.result==="A") m.teamA.forEach(p => pts[p]+=2);
-            else if (m.result==="B") m.teamB.forEach(p => pts[p]+=2);
-            else { m.teamA.forEach(p => pts[p]+=1); m.teamB.forEach(p => pts[p]+=1); }
+            const finished = typeof m.scoreA === "number" && typeof m.scoreB === "number";
+            if (m.result) {
+              // PJ
+              m.teamA.forEach(p => pj[p]++);
+              m.teamB.forEach(p => pj[p]++);
+              // Pts
+              if (m.result === "A") m.teamA.forEach(p => pts[p] += 2);
+              else if (m.result === "B") m.teamB.forEach(p => pts[p] += 2);
+              else { m.teamA.forEach(p => pts[p] += 1); m.teamB.forEach(p => pts[p] += 1); }
+            }
+            // PF / PC si hay marcador
+            if (finished) {
+              m.teamA.forEach(p => { pf[p] += m.scoreA; pc[p] += m.scoreB; });
+              m.teamB.forEach(p => { pf[p] += m.scoreB; pc[p] += m.scoreA; });
+            }
           });
-          return { pts, pj };
+
+          return { pts, pj, pf, pc };
         }, [matches]);
 
-        // predicción (desde el partido 2)
+        // --- Predicción (solo a partir del partido 2) ------------------------
         const prediction = useMemo(() => {
           if (!started || currentIdx < 1 || currentIdx >= matches.length) return null;
           const m = matches[currentIdx];
 
-          // puntos antes del partido actual
+          // puntos previos
           const ptsBefore = Array(6).fill(0);
           for (let i=0;i<currentIdx;i++){
             const mm = matches[i]; if(!mm.result) continue;
@@ -98,25 +111,20 @@
           const probA = 1/(1+Math.exp(-diff/2));
           const label = Math.abs(diff)<0.75 ? "Partido muy igualado" : (diff>0 ? "Favorito: Equipo A" : "Favorito: Equipo B");
 
-          // tanteo estimado según media de puntos ya vistos
+          // tanteo (media de totales previos)
           const finished = matches.slice(0,currentIdx).filter(mm => typeof mm.scoreA==="number" && typeof mm.scoreB==="number");
           const avgTotal = finished.length>0 ? finished.reduce((s,mm)=> s+(mm.scoreA+mm.scoreB),0)/finished.length : 12;
           const confidence = Math.abs(probA-0.5)*2; // 0..1
           const margin = Math.max(1, Math.round(confidence * (avgTotal * 0.6)));
 
           let predA, predB;
-          if (probA >= 0.5) {
-            predA = Math.round(avgTotal/2 + margin/2);
-            predB = Math.max(0, predA - margin);
-          } else {
-            predB = Math.round(avgTotal/2 + margin/2);
-            predA = Math.max(0, predB - margin);
-          }
+          if (probA >= 0.5) { predA = Math.round(avgTotal/2 + margin/2); predB = Math.max(0, predA - margin); }
+          else { predB = Math.round(avgTotal/2 + margin/2); predA = Math.max(0, predB - margin); }
 
           return { probA, probB: 1-probA, label, predA, predB };
         }, [started, currentIdx, matches]);
 
-        // guardar resultado
+        // --- Acciones --------------------------------------------------------
         function submitScore() {
           if (currentIdx >= matches.length) return;
           const a = parseInt(scoreA,10), b = parseInt(scoreB,10);
@@ -129,22 +137,27 @@
           if (currentIdx + 1 < next.length) { setCurrentIdx(i=>i+1); setActiveTab("partido"); }
           else { setCurrentIdx(next.length); setActiveTab("clasificacion"); }
         }
-
         function undoLast(){ if (currentIdx===0) return; const i=currentIdx-1; const next=[...matches]; next[i]={...next[i],scoreA:undefined,scoreB:undefined,result:undefined}; setMatches(next); setCurrentIdx(i); setActiveTab("partido"); }
         function resetAll(){ setStarted(false); setMatches([]); setCurrentIdx(0); setScoreA(""); setScoreB(""); setActiveTab("jugadores"); }
 
-        const remaining = started ? matches.slice(currentIdx) : [];
-        const finished  = started ? matches.slice(0,currentIdx) : [];
-
+        // --- Filas ordenadas (Pts desc, PF desc, PC asc, nombre) ------------
         const playerRows = useMemo(() =>
           names.map((n,i)=>({
             name: n.trim() || `J${i+1}`,
             pts: standings.pts[i]||0,
-            pj: standings.pj[i]||0,
+            pj:  standings.pj[i] ||0,
+            pf:  standings.pf[i] ||0,
+            pc:  standings.pc[i] ||0,
             ppp: (standings.pj[i]||0)>0 ? (standings.pts[i]/standings.pj[i]).toFixed(2) : "-"
-          })).sort((a,b)=> b.pts-a.pts || a.name.localeCompare(b.name))
+          })).sort((a,b)=>
+            b.pts - a.pts ||
+            b.pf  - a.pf  ||
+            a.pc  - b.pc  ||
+            a.name.localeCompare(b.name)
+          )
         ,[names, standings]);
 
+        // --- UI --------------------------------------------------------------
         const TabButton = ({ id, label }) => (
           <button
             onClick={() => setActiveTab(id)}
@@ -192,7 +205,7 @@
                       </div>
                     ))}
                     <div className="flex items-center justify-between text-xs text-slate-500">
-                      <div>Partidos totales: {matches.length || 10} · Jugados: {finished.length} · Pendientes: {started ? remaining.length : 10}</div>
+                      <div>Partidos totales: {matches.length || 10} · Jugados: {started ? currentIdx : 0} · Pendientes: {started ? (matches.length - currentIdx) : 10}</div>
                       <div className="flex gap-2">
                         <button onClick={resetAll} className="rounded-xl px-3 py-2 bg-slate-100 hover:bg-slate-200 border">Reiniciar</button>
                         <button
@@ -216,7 +229,7 @@
               {/* Partido */}
               {activeTab==="partido" && (
                 <div className="bg-white rounded-2xl shadow p-5">
-                  <h2 className="text-xl font-semibold mb-4">Partido en curso — Partido {currentIdx + 1} de {matches.length}</h2>
+                  <h2 className="text-xl font-semibold mb-4">Partido en curso — Partido {Math.min(currentIdx + 1, matches.length)} de {matches.length || 10}</h2>
                   {!started || currentIdx >= matches.length ? (
                     <div className="text-slate-600">{!started ? "Aún no has iniciado la sesión" : "No quedan partidos pendientes. 🎉"}</div>
                   ) : (
@@ -232,12 +245,13 @@
                                 <div className="uppercase text-xs text-slate-500 mb-1">Equipo A</div>
                                 <ul className="list-disc ml-5">{teamA.map((n,i)=>(<li key={i}>{n}</li>))}</ul>
                               </div>
-                              <div className="rounded-xl border p-4">
+                              <div className="rounded-2xl border p-4">
                                 <div className="uppercase text-xs text-slate-500 mb-1">Equipo B</div>
                                 <ul className="list-disc ml-5">{teamB.map((n,i)=>(<li key={i}>{n}</li>))}</ul>
                               </div>
                             </div>
 
+                            {/* Predicción (desde el partido 2) */}
                             {prediction && (
                               <div className="rounded-xl bg-indigo-50 border border-indigo-200 p-4">
                                 <div className="text-sm font-semibold mb-1">Predicción del resultado</div>
@@ -277,7 +291,7 @@
                 </div>
               )}
 
-              {/* Clasificación + Historial con “upsets” en rojo pastel */}
+              {/* Clasificación + Historial con upsets */}
               {activeTab==="clasificacion" && (
                 <div className="space-y-6">
                   <div className="bg-white rounded-2xl shadow p-5">
@@ -290,6 +304,8 @@
                               <th className="py-2">Jugador</th>
                               <th className="py-2">Pts</th>
                               <th className="py-2">PJ</th>
+                              <th className="py-2">PF</th>
+                              <th className="py-2">PC</th>
                               <th className="py-2">Pts/PJ</th>
                             </tr>
                           </thead>
@@ -299,6 +315,8 @@
                                 <td className="py-2 font-medium">{r.name}</td>
                                 <td className="py-2">{r.pts}</td>
                                 <td className="py-2">{r.pj}</td>
+                                <td className="py-2">{r.pf}</td>
+                                <td className="py-2">{r.pc}</td>
                                 <td className="py-2">{r.ppp}</td>
                               </tr>
                             ))}
@@ -317,7 +335,7 @@
                       <h2 className="text-xl font-semibold mb-4">Historial de partidos</h2>
                       <div className="grid gap-3 md:grid-cols-2">
                         {matches.map((m, idx) => {
-                          // favorito calculado con puntos ANTES de ese partido
+                          // favorito antes de ese partido
                           const ptsBefore = Array(6).fill(0);
                           for (let i=0;i<idx;i++){
                             const mm = matches[i]; if(!mm.result) continue;
